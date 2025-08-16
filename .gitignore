@@ -99,3 +99,5 @@ src/pybind/rgw/rgw.c
 src/pybind/rgw/rgw.egg-info/
 .ccache
 .direnv
+debs/
+.nix-wrappers

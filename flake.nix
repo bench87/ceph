@@ -19,6 +19,26 @@
       inherit system;
       config.allowUnfree = true;
     };
+  in let
+    python3WithPackages = pkgs.python311.withPackages (ps: with ps; [
+      pip
+      pyyaml
+      cython
+      sphinx
+      setuptools
+      prettytable
+      python-dateutil
+      requests
+      pkgs-bcrypt.python311Packages.bcrypt
+      packaging
+      pyopenssl
+      cherrypy
+      jinja2
+      natsort
+      asyncssh
+      werkzeug
+      pecan
+    ]);
   in {
     devShells.default = pkgs.mkShell rec {
       name = "ceph-dev-shell";
@@ -34,7 +54,6 @@
         binutils
         pkg-config
         fuse
-        ccache
         autoconf
 
         rdma-core
@@ -53,11 +72,17 @@
         gnused
         findutils
         procps
-        sudo
         ragel
+        clang-tools
+        
+        # Python with packages
+        python3WithPackages
       ];
 
       buildInputs = with pkgs; [
+        # Build tools
+        ccache
+        
         # Core C/C++ libraries
         boost
         brotli
@@ -107,24 +132,6 @@
         hostname
         libselinux
         checkpolicy
-        python311
-        python311Packages.pip
-        python311Packages.pyyaml
-        python311Packages.cython
-        python311Packages.sphinx
-        python311Packages.setuptools
-        python311Packages.prettytable
-        python311Packages.python-dateutil
-        python311Packages.requests
-        pkgs-bcrypt.python311Packages.bcrypt
-        python311Packages.packaging
-        python311Packages.pyopenssl
-        python311Packages.cherrypy
-        python311Packages.jinja2
-        python311Packages.natsort
-        python311Packages.asyncssh
-        python311Packages.werkzeug
-        python311Packages.pecan
         lua5_4_compat
         nasm
       ];
@@ -136,6 +143,42 @@
         mkdir -p $CCACHE_DIR
         export AS=nasm
         export LDFLAGS="-L${pkgs.brotli}/lib -lbrotlicommon $LDFLAGS"
+        
+        # Create wrapper for scripts with hardcoded shebangs (NixOS compatibility)
+        mkdir -p .nix-wrappers
+        cat > .nix-wrappers/build-with-container.py << 'WRAPPER'
+#!/usr/bin/env bash
+exec ${python3WithPackages}/bin/python3 ./src/script/build-with-container.py "$@"
+WRAPPER
+        chmod +x .nix-wrappers/build-with-container.py
+        
+        # Add wrapper directory to PATH for convenience
+        export PATH="$(pwd)/.nix-wrappers:$PATH"
+          cat <<EOF
+╔══════════════════════════════════════════════╗
+║       🐙 Ceph Development Environment        ║
+╚══════════════════════════════════════════════╝
+Development:
+./do_cmake.sh -DWITH_MANPAGE=OFF -DWITH_BABELTRACE=OFF -DWITH_MGR_DASHBOARD_FRONTEND=OFF -DWITH_SYSTEM_ARROW=ON
+cmake --build build
+
+Container Build:
+# Build Ceph with container (includes building binaries and creating Docker image)
+# Note: On NixOS, use 'build-with-container.py' directly (wrapper in PATH)
+build-with-container.py -d ubuntu22.04 -e packages
+
+# Alternative options:
+# - Build only: build-with-container.py -d ubuntu22.04 -e build
+# - Interactive: build-with-container.py -d ubuntu22.04 -e interactive
+# - Custom build dir: build-with-container.py -d ubuntu22.04 -b build.custom -e build
+# - CentOS build: build-with-container.py -d centos9 -e packages
+
+# On non-NixOS systems, use: python3 ./src/script/build-with-container.py [options]
+
+Available commands:
+- ccache stats    # Check ccache statistics
+- ninja -C build  # Build the project
+EOF
       '';
     };
 
