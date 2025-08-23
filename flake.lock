@@ -16,26 +16,9 @@
         "type": "github"
       }
     },
-    "nixpkgs-py-bcrypt": {
-      "locked": {
-        "lastModified": 1709246466,
-        "narHash": "sha256-jN8Y5Zv2tNUKIGuSqhm8yIMn2x6jhMQvNwKYduvKxjU=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "ed4db9c6c75079ff3570a9e3eb6806c8f692dc26",
-        "type": "github"
-      },
-      "original": {
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "ed4db9c6c75079ff3570a9e3eb6806c8f692dc26",
-        "type": "github"
-      }
-    },
     "root": {
       "inputs": {
         "nixpkgs": "nixpkgs",
-        "nixpkgs-py-bcrypt": "nixpkgs-py-bcrypt",
         "utils": "utils"
       }
     },

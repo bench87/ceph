@@ -3,7 +3,6 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
-    nixpkgs-py-bcrypt.url = "github:NixOS/nixpkgs/ed4db9c6c75079ff3570a9e3eb6806c8f692dc26";
     utils.url = "github:numtide/flake-utils";
   };
 
@@ -15,30 +14,92 @@
       overlays = [];
       config.allowUnfree = true; # For some dependencies if needed
     };
-    pkgs-bcrypt = import inputs.nixpkgs-py-bcrypt {
-      inherit system;
-      config.allowUnfree = true;
-    };
-  in let
-    python3WithPackages = pkgs.python311.withPackages (ps: with ps; [
+    
+    # Python configuration based on official Ceph package
+    # Use bcrypt from older nixpkgs for compatibility
+    python = pkgs.python311.override {
+      packageOverrides = self: super: 
+          let
+            bcryptOverrideVersion = "4.0.1";
+          in
+            {
+            # Ceph does not support the following yet:
+            # * `bcrypt` > 4.0
+            # * `cryptography` > 40
+            # See:
+            # * https://github.com/NixOS/nixpkgs/pull/281858#issuecomment-1899358602
+            # * Upstream issue: https://tracker.ceph.com/issues/63529
+            #   > Python Sub-Interpreter Model Used by ceph-mgr Incompatible With Python Modules Based on PyO3
+            # * Moved to issue: https://tracker.ceph.com/issues/64213
+            #   > MGR modules incompatible with later PyO3 versions - PyO3 modules may only be initialized once per interpreter process
+
+            bcrypt = super.bcrypt.overridePythonAttrs (old: rec {
+              pname = "bcrypt";
+              version = bcryptOverrideVersion;
+              src = pkgs.fetchPypi {
+                inherit pname version;
+                hash = "sha256-J9N1kDrIJhz+QEf2cJ0W99GNObHskqr3KvmJVSplDr0=";
+              };
+              cargoRoot = "src/_bcrypt";
+              cargoDeps = pkgs.rustPlatform.fetchCargoTarball {
+                inherit src;
+                sourceRoot = "${pname}-${version}/${cargoRoot}";
+                name = "${pname}-${version}";
+                hash = "sha256-lDWX69YENZFMu7pyBmavUZaalGvFqbHSHfkwkzmDQaY=";
+              };
+            });
+          };
+      };
+    
+    # Comprehensive Python environment for Ceph  
+    # Use our overridden python with fixed bcrypt
+    ceph-python-env = python.withPackages (ps: with ps; [
+      # Build time requirements
       pip
-      pyyaml
-      cython
-      sphinx
+      cython_0
       setuptools
+      sphinx
+      virtualenv
+      
+      # Core dependencies (from debian/control)
+      pyyaml
+      bcrypt
+      cherrypy
+      influxdb
+      jinja2
+      kubernetes
+      markupsafe
+      natsort
+      numpy
+      pecan
       prettytable
+      pyjwt
+      pyopenssl
       python-dateutil
       requests
-      pkgs-bcrypt.python311Packages.bcrypt
-      packaging
-      pyopenssl
-      cherrypy
-      jinja2
-      natsort
-      asyncssh
+      routes
+      scikit-learn
+      scipy
       werkzeug
-      pecan
+      
+      # Required manager modules (src/pybind/mgr/requirements-required.txt)
+      cryptography
+      jsonpatch
+      
+      # CephFS shell dependencies
+      cmd2
+      colorama
+      
+      # Additional dependencies
+      packaging
+      asyncssh
     ]);
+    inherit (ceph-python-env.python) sitePackages; 
+    # Boost with Python support enabled
+    boost' = pkgs.boost183.override {
+      enablePython = true;
+      inherit python;
+    };
   in {
     devShells.default = pkgs.mkShell rec {
       name = "ceph-dev-shell";
@@ -53,7 +114,6 @@
         ninja
         binutils
         pkg-config
-        fuse
         autoconf
 
         rdma-core
@@ -74,17 +134,21 @@
         procps
         ragel
         clang-tools
+        python.pkgs.python # for the toPythonPath function
+        python.pkgs.wrapPython
         
-        # Python with packages
-        python3WithPackages
       ];
 
       buildInputs = with pkgs; [
         # Build tools
         ccache
+        # Adding `ceph-python-env` here adds the env's `site-packages` to `PYTHONPATH` during the build.
+        # This is important, otherwise the build system may not find the Python deps and then
+        # silently skip installing ceph-volume and other Ceph python tools.
+        ceph-python-env
         
         # Core C/C++ libraries
-        boost
+        boost'  # Use our Boost with Python support
         brotli
         lz4
         expat
@@ -100,6 +164,9 @@
         cryptsetup
         libnbd
         curl
+        fuse
+        libedit
+        expat
         libcap
         libcap_ng
         fmt
@@ -135,6 +202,10 @@
         lua5_4_compat
         nasm
       ];
+        pythonPath = [
+          ceph-python-env
+          "${placeholder "out"}/${ceph-python-env.sitePackages}"
+        ];
 
       shellHook = let
         icon = "f308"; # Ceph icon
@@ -144,22 +215,24 @@
         export AS=nasm
         export LDFLAGS="-L${pkgs.brotli}/lib -lbrotlicommon $LDFLAGS"
         
+        # Set Python environment for Ceph build
+        
         # Create wrapper for scripts with hardcoded shebangs (NixOS compatibility)
         mkdir -p .nix-wrappers
         cat > .nix-wrappers/build-with-container.py << 'WRAPPER'
 #!/usr/bin/env bash
-exec ${python3WithPackages}/bin/python3 ./src/script/build-with-container.py "$@"
+exec python3 ./src/script/build-with-container.py "$@"
 WRAPPER
         chmod +x .nix-wrappers/build-with-container.py
         
-        # Add wrapper directory to PATH for convenience
-        export PATH="$(pwd)/.nix-wrappers:$PATH"
+        # Add wrapper directory and build/bin to PATH for convenience
+        export PATH="$(pwd)/.nix-wrappers:$(pwd)/build/bin:$PATH"
           cat <<EOF
 ╔══════════════════════════════════════════════╗
 ║       🐙 Ceph Development Environment        ║
 ╚══════════════════════════════════════════════╝
 Development:
-./do_cmake.sh -DWITH_MANPAGE=OFF -DWITH_BABELTRACE=OFF -DWITH_MGR_DASHBOARD_FRONTEND=OFF -DWITH_SYSTEM_ARROW=ON
+./do_cmake.sh -DWITH_MANPAGE=OFF -DWITH_BABELTRACE=OFF -DWITH_MGR_DASHBOARD_FRONTEND=OFF -DWITH_SYSTEM_ARROW=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 cmake --build build
 
 Container Build:

@@ -3,79 +3,75 @@
 
 #include <algorithm>
 #include <boost/algorithm/string/predicate.hpp>
-#include <map>
 #include <iterator>
+#include <map>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "common/armor.h"
-#include "common/utf8.h"
 #include "common/split.h"
-#include "rgw_rest_s3.h"
+#include "common/utf8.h"
 #include "rgw_auth_s3.h"
-#include "rgw_common.h"
 #include "rgw_client_io.h"
-#include "rgw_rest.h"
+#include "rgw_common.h"
 #include "rgw_crypt_sanitize.h"
+#include "rgw_rest.h"
+#include "rgw_rest_s3.h"
 
-#include <boost/container/small_vector.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/trim_all.hpp>
+#include <boost/container/small_vector.hpp>
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
 
 using namespace std;
 
-static const auto signed_subresources = {
-  "acl",
-  "cors",
-  "delete",
-  "encryption",
-  "lifecycle",
-  "location",
-  "logging",
-  "notification",
-  "partNumber",
-  "policy",
-  "policyStatus",
-  "publicAccessBlock",
-  "requestPayment",
-  "response-cache-control",
-  "response-content-disposition",
-  "response-content-encoding",
-  "response-content-language",
-  "response-content-type",
-  "response-expires",
-  "tagging",
-  "torrent",
-  "uploadId",
-  "uploads",
-  "versionId",
-  "versioning",
-  "versions",
-  "website",
-  "object-lock"
-};
+static const auto signed_subresources = {"acl",
+                                         "cors",
+                                         "delete",
+                                         "encryption",
+                                         "lifecycle",
+                                         "location",
+                                         "logging",
+                                         "notification",
+                                         "partNumber",
+                                         "policy",
+                                         "policyStatus",
+                                         "publicAccessBlock",
+                                         "requestPayment",
+                                         "response-cache-control",
+                                         "response-content-disposition",
+                                         "response-content-encoding",
+                                         "response-content-language",
+                                         "response-content-type",
+                                         "response-expires",
+                                         "tagging",
+                                         "torrent",
+                                         "uploadId",
+                                         "uploads",
+                                         "versionId",
+                                         "versioning",
+                                         "versions",
+                                         "website",
+                                         "object-lock"};
 
 /*
  * ?get the canonical amazon-style header for something?
  */
 
-template<typename M>
-static std::string
-get_canon_amz_hdrs(const M& map)
-{
+template <typename M> static std::string get_canon_amz_hdrs(const M &map) {
   size_t length = 0;
   std::string dest; // why dest?
-  std::for_each(map.begin(), map.end(), [&length] (const auto& elt) -> void {
-    length += elt.first.size() + sarrlen(":") + elt.second.size() +
-      sarrlen("\n");
+  std::for_each(map.begin(), map.end(), [&length](const auto &elt) -> void {
+    length +=
+        elt.first.size() + sarrlen(":") + elt.second.size() + sarrlen("\n");
   });
   dest.reserve(length);
 
-  for (const auto& kv : map) {
+  for (const auto &kv : map) {
     dest.append(kv.first);
     dest.append(":");
     dest.append(kv.second);
@@ -89,9 +85,8 @@ get_canon_amz_hdrs(const M& map)
  * ?get the canonical representation of the object's location
  */
 static std::string
-get_canon_resource(const DoutPrefixProvider *dpp, const char* const request_uri,
-                   const std::map<std::string, std::string>& sub_resources)
-{
+get_canon_resource(const DoutPrefixProvider *dpp, const char *const request_uri,
+                   const std::map<std::string, std::string> &sub_resources) {
   std::string dest;
 
   if (request_uri) {
@@ -99,12 +94,12 @@ get_canon_resource(const DoutPrefixProvider *dpp, const char* const request_uri,
   }
 
   bool initial = true;
-  for (const auto& subresource : signed_subresources) {
+  for (const auto &subresource : signed_subresources) {
     const auto iter = sub_resources.find(subresource);
     if (iter == std::end(sub_resources)) {
       continue;
     }
-    
+
     if (initial) {
       dest.append("?");
       initial = false;
@@ -113,7 +108,7 @@ get_canon_resource(const DoutPrefixProvider *dpp, const char* const request_uri,
     }
 
     dest.append(iter->first);
-    if (! iter->second.empty()) {
+    if (!iter->second.empty()) {
       dest.append("=");
       dest.append(iter->second);
     }
@@ -128,24 +123,19 @@ get_canon_resource(const DoutPrefixProvider *dpp, const char* const request_uri,
  * compute a request's signature
  */
 void rgw_create_s3_canonical_header(
-  const DoutPrefixProvider *dpp,
-  const char* const method,
-  const char* const content_md5,
-  const char* const content_type,
-  const char* const date,
-  const meta_map_t& meta_map,
-  const meta_map_t& qs_map,
-  const char* const request_uri,
-  const std::map<std::string, std::string>& sub_resources,
-  std::string& dest_str)
-{
+    const DoutPrefixProvider *dpp, const char *const method,
+    const char *const content_md5, const char *const content_type,
+    const char *const date, const meta_map_t &meta_map,
+    const meta_map_t &qs_map, const char *const request_uri,
+    const std::map<std::string, std::string> &sub_resources,
+    std::string &dest_str) {
   std::string dest;
 
   if (method) {
     dest = method;
   }
   dest.append("\n");
-  
+
   if (content_md5) {
     dest.append(content_md5);
   }
@@ -172,10 +162,9 @@ static inline bool is_base64_for_content_md5(unsigned char c) {
   return (isalnum(c) || isspace(c) || (c == '+') || (c == '/') || (c == '='));
 }
 
-static inline void get_v2_qs_map(const req_info& info,
-				 meta_map_t& qs_map) {
-  const auto& params = const_cast<RGWHTTPArgs&>(info.args).get_params();
-  for (const auto& elt : params) {
+static inline void get_v2_qs_map(const req_info &info, meta_map_t &qs_map) {
+  const auto &params = const_cast<RGWHTTPArgs &>(info.args).get_params();
+  for (const auto &elt : params) {
     std::string k = boost::algorithm::to_lower_copy(elt.first);
     if (k.find("x-amz-meta-") == /* offset */ 0) {
       rgw_add_amz_meta_header(qs_map, k, elt.second);
@@ -191,17 +180,16 @@ static inline void get_v2_qs_map(const req_info& info,
  * compute a request's signature
  */
 bool rgw_create_s3_canonical_header(const DoutPrefixProvider *dpp,
-                                    const req_info& info,
-                                    utime_t* const header_time,
-                                    std::string& dest,
-                                    const bool qsr)
-{
-  const char* const content_md5 = info.env->get("HTTP_CONTENT_MD5");
+                                    const req_info &info,
+                                    utime_t *const header_time,
+                                    std::string &dest, const bool qsr) {
+  const char *const content_md5 = info.env->get("HTTP_CONTENT_MD5");
   if (content_md5) {
     for (const char *p = content_md5; *p; p++) {
       if (!is_base64_for_content_md5(*p)) {
         ldpp_dout(dpp, 0) << "NOTICE: bad content-md5 provided (not base64),"
-                << " aborting request p=" << *p << " " << (int)*p << dendl;
+                          << " aborting request p=" << *p << " " << (int)*p
+                          << dendl;
         return false;
       }
     }
@@ -230,12 +218,15 @@ bool rgw_create_s3_canonical_header(const DoutPrefixProvider *dpp,
     if (header_time) {
       struct tm t;
       uint32_t ns = 0;
-      if (!parse_rfc2616(req_date, &t) && !parse_iso8601(req_date, &t, &ns, false)) {
-        ldpp_dout(dpp, 0) << "NOTICE: failed to parse date <" << req_date << "> for auth header" << dendl;
+      if (!parse_rfc2616(req_date, &t) &&
+          !parse_iso8601(req_date, &t, &ns, false)) {
+        ldpp_dout(dpp, 0) << "NOTICE: failed to parse date <" << req_date
+                          << "> for auth header" << dendl;
         return false;
       }
       if (t.tm_year < 70) {
-        ldpp_dout(dpp, 0) << "NOTICE: bad date (predates epoch): " << req_date << dendl;
+        ldpp_dout(dpp, 0) << "NOTICE: bad date (predates epoch): " << req_date
+                          << dendl;
         return false;
       }
       *header_time = utime_t(internal_timegm(&t), 0);
@@ -243,8 +234,8 @@ bool rgw_create_s3_canonical_header(const DoutPrefixProvider *dpp,
     }
   }
 
-  const auto& meta_map = info.x_meta_map;
-  const auto& sub_resources = info.args.get_sub_resources();
+  const auto &meta_map = info.x_meta_map;
+  const auto &sub_resources = info.args.get_sub_resources();
 
   std::string request_uri;
   if (info.effective_uri.empty()) {
@@ -255,15 +246,13 @@ bool rgw_create_s3_canonical_header(const DoutPrefixProvider *dpp,
 
   rgw_create_s3_canonical_header(dpp, info.method, content_md5, content_type,
                                  date.c_str(), meta_map, qs_map,
-				 request_uri.c_str(), sub_resources, dest);
+                                 request_uri.c_str(), sub_resources, dest);
   return true;
 }
 
-
 namespace rgw::auth::s3 {
 
-bool is_time_skew_ok(time_t t)
-{
+bool is_time_skew_ok(time_t t) {
   auto req_tp = ceph::coarse_real_clock::from_time_t(t);
   auto cur_tp = ceph::coarse_real_clock::now();
 
@@ -277,12 +266,13 @@ bool is_time_skew_ok(time_t t)
   return true;
 }
 
-static inline int parse_v4_query_string(const req_info& info,              /* in */
-                                        std::string_view& credential,    /* out */
-                                        std::string_view& signedheaders, /* out */
-                                        std::string_view& signature,     /* out */
-                                        std::string_view& date,          /* out */
-                                        std::string_view& sessiontoken)  /* out */
+static inline int
+parse_v4_query_string(const req_info &info,            /* in */
+                      std::string_view &credential,    /* out */
+                      std::string_view &signedheaders, /* out */
+                      std::string_view &signature,     /* out */
+                      std::string_view &date,          /* out */
+                      std::string_view &sessiontoken)  /* out */
 {
   /* auth ships with req params ... */
 
@@ -306,7 +296,7 @@ static inline int parse_v4_query_string(const req_info& info,              /* in
      the generated presigned URL is valid. The minimum value
      you can set is 1, and the maximum is 604800 (seven days) */
   time_t exp = atoll(expires.data());
-  if ((exp < 1) || (exp > 7*24*60*60)) {
+  if ((exp < 1) || (exp > 7 * 24 * 60 * 60)) {
     dout(10) << "ERROR: exp out of range, exp = " << exp << dendl;
     return -EPERM;
   }
@@ -314,7 +304,8 @@ static inline int parse_v4_query_string(const req_info& info,              /* in
   uint64_t req_sec = (uint64_t)internal_timegm(&date_t);
   uint64_t now = ceph_clock_now();
   if (now >= req_sec + exp) {
-    dout(10) << "ERROR: presigned URL has expired, now = " << now << ", req_sec = " << req_sec << ", exp = " << exp << dendl;
+    dout(10) << "ERROR: presigned URL has expired, now = " << now
+             << ", req_sec = " << req_sec << ", exp = " << exp << dendl;
     return -ERR_PRESIGNED_URL_EXPIRED;
   }
 
@@ -338,11 +329,8 @@ static inline int parse_v4_query_string(const req_info& info,              /* in
   return 0;
 }
 
-static bool get_next_token(const std::string_view& s,
-                           size_t& pos,
-                           const char* const delims,
-                           std::string_view& token)
-{
+static bool get_next_token(const std::string_view &s, size_t &pos,
+                           const char *const delims, std::string_view &token) {
   const size_t start = s.find_first_not_of(delims, pos);
   if (start == std::string_view::npos) {
     pos = s.size();
@@ -360,10 +348,9 @@ static bool get_next_token(const std::string_view& s,
   return true;
 }
 
-template<std::size_t ExpectedStrNum>
+template <std::size_t ExpectedStrNum>
 boost::container::small_vector<std::string_view, ExpectedStrNum>
-get_str_vec(const std::string_view& str, const char* const delims)
-{
+get_str_vec(const std::string_view &str, const char *const delims) {
   boost::container::small_vector<std::string_view, ExpectedStrNum> str_vec;
 
   size_t pos = 0;
@@ -379,26 +366,25 @@ get_str_vec(const std::string_view& str, const char* const delims)
   return str_vec;
 }
 
-template<std::size_t ExpectedStrNum>
+template <std::size_t ExpectedStrNum>
 boost::container::small_vector<std::string_view, ExpectedStrNum>
-get_str_vec(const std::string_view& str)
-{
+get_str_vec(const std::string_view &str) {
   const char delims[] = ";,= \t";
   return get_str_vec<ExpectedStrNum>(str, delims);
 }
 
-static inline int parse_v4_auth_header(const req_info& info,               /* in */
-                                       std::string_view& credential,     /* out */
-                                       std::string_view& signedheaders,  /* out */
-                                       std::string_view& signature,      /* out */
-                                       std::string_view& date,           /* out */
-                                       std::string_view& sessiontoken,   /* out */
-                                       const DoutPrefixProvider *dpp)
-{
+static inline int
+parse_v4_auth_header(const req_info &info,            /* in */
+                     std::string_view &credential,    /* out */
+                     std::string_view &signedheaders, /* out */
+                     std::string_view &signature,     /* out */
+                     std::string_view &date,          /* out */
+                     std::string_view &sessiontoken,  /* out */
+                     const DoutPrefixProvider *dpp) {
   std::string_view input(info.env->get("HTTP_AUTHORIZATION", ""));
   try {
     input = input.substr(::strlen(AWS4_HMAC_SHA256_STR) + 1);
-  } catch (std::out_of_range&) {
+  } catch (std::out_of_range &) {
     /* We should never ever run into this situation as the presence of
      * AWS4_HMAC_SHA256_STR had been verified earlier. */
     ldpp_dout(dpp, 10) << "credentials string is too short" << dendl;
@@ -406,25 +392,22 @@ static inline int parse_v4_auth_header(const req_info& info,               /* in
   }
 
   std::map<std::string_view, std::string_view> kv;
-  for (const auto& s : get_str_vec<4>(input, ",")) {
+  for (const auto &s : get_str_vec<4>(input, ",")) {
     const auto parsed_pair = parse_key_value(s);
     if (parsed_pair) {
       kv[parsed_pair->first] = parsed_pair->second;
     } else {
-      ldpp_dout(dpp, 10) << "NOTICE: failed to parse auth header (s=" << s << ")"
-               << dendl;
+      ldpp_dout(dpp, 10) << "NOTICE: failed to parse auth header (s=" << s
+                         << ")" << dendl;
       return -EINVAL;
     }
   }
 
   static const std::array<std::string_view, 3> required_keys = {
-    "Credential",
-    "SignedHeaders",
-    "Signature"
-  };
+      "Credential", "SignedHeaders", "Signature"};
 
   /* Ensure that the presigned required keys are really there. */
-  for (const auto& k : required_keys) {
+  for (const auto &k : required_keys) {
     if (kv.find(k) == std::end(kv)) {
       ldpp_dout(dpp, 10) << "NOTICE: auth header missing key: " << k << dendl;
       return -EINVAL;
@@ -449,7 +432,8 @@ static inline int parse_v4_auth_header(const req_info& info,               /* in
     d = info.env->get("HTTP_DATE");
   }
   if (!d || !parse_iso8601(d, &t, NULL, false)) {
-    ldpp_dout(dpp, 10) << "error reading date via http_x_amz_date and http_date" << dendl;
+    ldpp_dout(dpp, 10) << "error reading date via http_x_amz_date and http_date"
+                       << dendl;
     return -EACCES;
   }
   date = d;
@@ -466,8 +450,7 @@ static inline int parse_v4_auth_header(const req_info& info,               /* in
   return 0;
 }
 
-bool is_non_s3_op(RGWOpType op_type)
-{
+bool is_non_s3_op(RGWOpType op_type) {
   switch (op_type) {
   case RGW_STS_GET_SESSION_TOKEN:
   case RGW_STS_ASSUME_ROLE:
@@ -535,24 +518,23 @@ bool is_non_s3_op(RGWOpType op_type)
   }
 }
 
-int parse_v4_credentials(const req_info& info,                     /* in */
-			 std::string_view& access_key_id,        /* out */
-			 std::string_view& credential_scope,     /* out */
-			 std::string_view& signedheaders,        /* out */
-			 std::string_view& signature,            /* out */
-			 std::string_view& date,                 /* out */
-			 std::string_view& session_token,        /* out */
-			 const bool using_qs,                    /* in */
-                         const DoutPrefixProvider *dpp)
-{
+int parse_v4_credentials(const req_info &info,               /* in */
+                         std::string_view &access_key_id,    /* out */
+                         std::string_view &credential_scope, /* out */
+                         std::string_view &signedheaders,    /* out */
+                         std::string_view &signature,        /* out */
+                         std::string_view &date,             /* out */
+                         std::string_view &session_token,    /* out */
+                         const bool using_qs,                /* in */
+                         const DoutPrefixProvider *dpp) {
   std::string_view credential;
   int ret;
   if (using_qs) {
-    ret = parse_v4_query_string(info, credential, signedheaders,
-                                signature, date, session_token);
+    ret = parse_v4_query_string(info, credential, signedheaders, signature,
+                                date, session_token);
   } else {
-    ret = parse_v4_auth_header(info, credential, signedheaders,
-                               signature, date, session_token, dpp);
+    ret = parse_v4_auth_header(info, credential, signedheaders, signature, date,
+                               session_token, dpp);
   }
 
   if (ret < 0) {
@@ -583,10 +565,8 @@ int parse_v4_credentials(const req_info& info,                     /* in */
   return 0;
 }
 
-string gen_v4_scope(const ceph::real_time& timestamp,
-                    const string& region,
-                    const string& service)
-{
+string gen_v4_scope(const ceph::real_time &timestamp, const string &region,
+                    const string &service) {
 
   auto sec = real_clock::to_time_t(timestamp);
 
@@ -601,10 +581,16 @@ string gen_v4_scope(const ceph::real_time& timestamp,
                      year, mon, day, region, service);
 }
 
-std::string get_v4_canonical_qs(const req_info& info, const bool using_qs)
-{
+std::string get_v4_canonical_qs(const req_info &info, const bool using_qs, const DoutPrefixProvider* dpp) {
   const std::string *params = &info.request_params;
   std::string copy_params;
+  
+  // Log the raw request params 
+  if (dpp) {
+    ldpp_dout(dpp, 0) << "get_v4_canonical_qs: raw request_params = [" << info.request_params << "]" << dendl;
+    ldpp_dout(dpp, 0) << "get_v4_canonical_qs: using_qs = " << using_qs << dendl;
+  }
+  
   if (params->empty()) {
     /* Optimize the typical flow. */
     return std::string();
@@ -613,12 +599,15 @@ std::string get_v4_canonical_qs(const req_info& info, const bool using_qs)
     copy_params = *params;
     boost::replace_all(copy_params, "+", "%20");
     params = &copy_params;
+    if (dpp) {
+      ldpp_dout(dpp, 0) << "get_v4_canonical_qs: after + replacement = [" << copy_params << "]" << dendl;
+    }
   }
 
   /* Handle case when query string exists. Step 3 described in: http://docs.
    * aws.amazon.com/general/latest/gr/sigv4-create-canonical-request.html */
   std::multimap<std::string, std::string> canonical_qs_map;
-  for (const auto& s : get_str_vec<5>(*params, "&")) {
+  for (const auto &s : get_str_vec<5>(*params, "&")) {
     std::string_view key, val;
     const auto parsed_pair = parse_key_value(s);
     if (parsed_pair) {
@@ -630,15 +619,28 @@ std::string get_v4_canonical_qs(const req_info& info, const bool using_qs)
       key = s;
     }
 
+    if (dpp) {
+      ldpp_dout(dpp, 0) << "get_v4_canonical_qs: processing param: key=[" << key << "] val=[" << val << "]" << dendl;
+    }
+
     if (using_qs && boost::iequals(key, "X-Amz-Signature")) {
       /* Preserving the original behaviour of get_v4_canonical_qs() here. */
+      if (dpp) {
+        ldpp_dout(dpp, 0) << "get_v4_canonical_qs: skipping X-Amz-Signature" << dendl;
+      }
       continue;
     }
 
     // while awsv4 specs ask for all slashes to be encoded, s3 itself is relaxed
     // in its implementation allowing non-url-encoded slashes to be present in
     // presigned urls for instance
-    canonical_qs_map.insert({{aws4_uri_recode(key, true), aws4_uri_recode(val, true)}});
+    std::string recoded_key = aws4_uri_recode(key, true);
+    std::string recoded_val = aws4_uri_recode(val, true);
+    if (dpp) {
+      ldpp_dout(dpp, 0) << "get_v4_canonical_qs: after aws4_uri_recode: key=[" << recoded_key << "] val=[" << recoded_val << "]" << dendl;
+    }
+    
+    canonical_qs_map.insert({{recoded_key, recoded_val}});
   }
 
   /* Thanks to the early exist we have the guarantee that canonical_qs_map has
@@ -646,25 +648,34 @@ std::string get_v4_canonical_qs(const req_info& info, const bool using_qs)
   auto iter = std::begin(canonical_qs_map);
   std::string canonical_qs;
   canonical_qs.append(iter->first)
-              .append("=", sarrlen("="))
-              .append(iter->second);
+      .append("=", sarrlen("="))
+      .append(iter->second);
 
   for (iter++; iter != std::end(canonical_qs_map); iter++) {
     canonical_qs.append("&", sarrlen("&"))
-                .append(iter->first)
-                .append("=", sarrlen("="))
-                .append(iter->second);
+        .append(iter->first)
+        .append("=", sarrlen("="))
+        .append(iter->second);
+  }
+
+  if (dpp) {
+    ldpp_dout(dpp, 0) << "get_v4_canonical_qs: final canonical_qs = [" << canonical_qs << "]" << dendl;
+    
+    // Log each param in the canonical_qs_map for debugging
+    ldpp_dout(dpp, 0) << "get_v4_canonical_qs: canonical_qs_map contents:" << dendl;
+    for (const auto& [k, v] : canonical_qs_map) {
+      ldpp_dout(dpp, 0) << "  [" << k << "] = [" << v << "]" << dendl;
+    }
   }
 
   return canonical_qs;
 }
 
-static void add_v4_canonical_params_from_map(const map<string, string>& m,
-                                        std::map<string, string> *result,
-                                        bool is_non_s3_op)
-{
-  for (auto& entry : m) {
-    const auto& key = entry.first;
+static void add_v4_canonical_params_from_map(const map<string, string> &m,
+                                             std::map<string, string> *result,
+                                             bool is_non_s3_op) {
+  for (auto &entry : m) {
+    const auto &key = entry.first;
     if (key.empty() || (is_non_s3_op && key == "PayloadHash")) {
       continue;
     }
@@ -673,12 +684,13 @@ static void add_v4_canonical_params_from_map(const map<string, string>& m,
   }
 }
 
-std::string gen_v4_canonical_qs(const req_info& info, bool is_non_s3_op)
-{
+std::string gen_v4_canonical_qs(const req_info &info, bool is_non_s3_op) {
   std::map<std::string, std::string> canonical_qs_map;
 
-  add_v4_canonical_params_from_map(info.args.get_params(), &canonical_qs_map, is_non_s3_op);
-  add_v4_canonical_params_from_map(info.args.get_sys_params(), &canonical_qs_map, false);
+  add_v4_canonical_params_from_map(info.args.get_params(), &canonical_qs_map,
+                                   is_non_s3_op);
+  add_v4_canonical_params_from_map(info.args.get_sys_params(),
+                                   &canonical_qs_map, false);
 
   if (canonical_qs_map.empty()) {
     return string();
@@ -689,37 +701,39 @@ std::string gen_v4_canonical_qs(const req_info& info, bool is_non_s3_op)
   auto iter = std::begin(canonical_qs_map);
   std::string canonical_qs;
   canonical_qs.append(iter->first)
-              .append("=", sarrlen("="))
-              .append(iter->second);
+      .append("=", sarrlen("="))
+      .append(iter->second);
 
   for (iter++; iter != std::end(canonical_qs_map); iter++) {
     canonical_qs.append("&", sarrlen("&"))
-                .append(iter->first)
-                .append("=", sarrlen("="))
-                .append(iter->second);
+        .append(iter->first)
+        .append("=", sarrlen("="))
+        .append(iter->second);
   }
 
   return canonical_qs;
 }
 
-std::string get_v4_canonical_method(const req_state* s)
-{
+std::string get_v4_canonical_method(const req_state *s) {
   /* If this is a OPTIONS request we need to compute the v4 signature for the
    * intended HTTP method and not the OPTIONS request itself. */
   if (s->op_type == RGW_OP_OPTIONS_CORS) {
-    const char *cors_method = s->info.env->get("HTTP_ACCESS_CONTROL_REQUEST_METHOD");
+    const char *cors_method =
+        s->info.env->get("HTTP_ACCESS_CONTROL_REQUEST_METHOD");
 
     if (cors_method) {
-      /* Validate request method passed in access-control-request-method is valid. */
+      /* Validate request method passed in access-control-request-method is
+       * valid. */
       auto cors_flags = get_cors_method_flags(cors_method);
       if (!cors_flags) {
-          ldpp_dout(s, 1) << "invalid access-control-request-method header = "
-                          << cors_method << dendl;
-          throw -EINVAL;
+        ldpp_dout(s, 1) << "invalid access-control-request-method header = "
+                        << cors_method << dendl;
+        throw -EINVAL;
       }
 
       ldpp_dout(s, 10) << "canonical req method = " << cors_method
-                       << ", due to access-control-request-method header" << dendl;
+                       << ", due to access-control-request-method header"
+                       << dendl;
       return cors_method;
     } else {
       ldpp_dout(s, 1) << "invalid http options req missing "
@@ -732,13 +746,11 @@ std::string get_v4_canonical_method(const req_state* s)
 }
 
 boost::optional<std::string>
-get_v4_canonical_headers(const req_info& info,
-                         const std::string_view& signedheaders,
-                         const bool using_qs,
-                         const bool force_boto2_compat)
-{
+get_v4_canonical_headers(const req_info &info,
+                         const std::string_view &signedheaders,
+                         const bool using_qs, const bool force_boto2_compat) {
   std::map<std::string_view, std::string> canonical_hdrs_map;
-  for (const auto& token : get_str_vec<5>(signedheaders, ";")) {
+  for (const auto &token : get_str_vec<5>(signedheaders, ";")) {
     /* TODO(rzarzynski): we'd like to switch to sstring here but it should
      * get push_back() and reserve() first. */
     std::string token_env = "HTTP_";
@@ -755,9 +767,10 @@ get_v4_canonical_headers(const req_info& info,
     } else if (token_env == "HTTP_CONTENT_TYPE") {
       token_env = "CONTENT_TYPE";
     }
-    const char* const t = info.env->get(token_env.c_str());
+    const char *const t = info.env->get(token_env.c_str());
     if (!t) {
-      dout(10) << "warning env var not available " << token_env.c_str() << dendl;
+      dout(10) << "warning env var not available " << token_env.c_str()
+               << dendl;
       continue;
     }
 
@@ -766,7 +779,7 @@ get_v4_canonical_headers(const req_info& info,
         !std::all_of(std::begin(token_value), std::end(token_value),
                      is_base64_for_content_md5)) {
       dout(0) << "NOTICE: bad content-md5 provided (not base64)"
-            << ", aborting request" << dendl;
+              << ", aborting request" << dendl;
       return boost::none;
     }
 
@@ -775,13 +788,13 @@ get_v4_canonical_headers(const req_info& info,
       std::string_view secure_port = info.env->get("SERVER_PORT_SECURE", "");
 
       if (!secure_port.empty()) {
-	if (secure_port != "443")
-	  token_value.append(":", sarrlen(":"))
-                     .append(secure_port.data(), secure_port.length());
+        if (secure_port != "443")
+          token_value.append(":", sarrlen(":"))
+              .append(secure_port.data(), secure_port.length());
       } else if (!port.empty()) {
-	if (port != "80")
-	  token_value.append(":", sarrlen(":"))
-                     .append(port.data(), port.length());
+        if (port != "80")
+          token_value.append(":", sarrlen(":"))
+              .append(port.data(), port.length());
       }
     }
 
@@ -789,22 +802,22 @@ get_v4_canonical_headers(const req_info& info,
   }
 
   std::string canonical_hdrs;
-  for (const auto& header : canonical_hdrs_map) {
-    const std::string_view& name = header.first;
+  for (const auto &header : canonical_hdrs_map) {
+    const std::string_view &name = header.first;
     std::string value = header.second;
     boost::trim_all<std::string>(value);
 
     canonical_hdrs.append(name.data(), name.length())
-                  .append(":", sarrlen(":"))
-                  .append(value)
-                  .append("\n", sarrlen("\n"));
+        .append(":", sarrlen(":"))
+        .append(value)
+        .append("\n", sarrlen("\n"));
   }
   return canonical_hdrs;
 }
 
-static void handle_header(const string& header, const string& val,
-                          std::map<std::string, std::string> *canonical_hdrs_map)
-{
+static void
+handle_header(const string &header, const string &val,
+              std::map<std::string, std::string> *canonical_hdrs_map) {
   /* TODO(rzarzynski): we'd like to switch to sstring here but it should
    * get push_back() and reserve() first. */
 
@@ -821,31 +834,29 @@ static void handle_header(const string& header, const string& val,
       start += 5; /* len("HTTP_") */
     }
 
-    std::transform(start, std::end(header),
-                   std::back_inserter(token), [](const int c) {
-                   return c == '_' ? '-' : std::tolower(c);
-                   });
+    std::transform(
+        start, std::end(header), std::back_inserter(token),
+        [](const int c) { return c == '_' ? '-' : std::tolower(c); });
   }
 
   (*canonical_hdrs_map)[token] = rgw_trim_whitespace(val);
 }
 
-std::string gen_v4_canonical_headers(const req_info& info,
-                                     const map<string, string>& extra_headers,
-                                     string *signed_hdrs)
-{
+std::string gen_v4_canonical_headers(const req_info &info,
+                                     const map<string, string> &extra_headers,
+                                     string *signed_hdrs) {
   std::map<std::string, std::string> canonical_hdrs_map;
-  for (auto& entry : info.env->get_map()) {
+  for (auto &entry : info.env->get_map()) {
     handle_header(entry.first, entry.second, &canonical_hdrs_map);
   }
-  for (auto& entry : extra_headers) {
+  for (auto &entry : extra_headers) {
     handle_header(entry.first, entry.second, &canonical_hdrs_map);
   }
 
   std::string canonical_hdrs;
   signed_hdrs->clear();
-  for (const auto& header : canonical_hdrs_map) {
-    const auto& name = header.first;
+  for (const auto &header : canonical_hdrs_map) {
+    const auto &name = header.first;
     std::string value = header.second;
     boost::trim_all<std::string>(value);
 
@@ -855,9 +866,9 @@ std::string gen_v4_canonical_headers(const req_info& info,
     signed_hdrs->append(name);
 
     canonical_hdrs.append(name.data(), name.length())
-                  .append(":", sarrlen(":"))
-                  .append(value)
-                  .append("\n", sarrlen("\n"));
+        .append(":", sarrlen(":"))
+        .append(value)
+        .append("\n", sarrlen("\n"));
   }
 
   return canonical_hdrs;
@@ -868,32 +879,33 @@ std::string gen_v4_canonical_headers(const req_info& info,
  *
  * http://docs.aws.amazon.com/general/latest/gr/sigv4-create-canonical-request.html
  */
-sha256_digest_t
-get_v4_canon_req_hash(CephContext* cct,
-                      const std::string_view& http_verb,
-                      const std::string& canonical_uri,
-                      const std::string& canonical_qs,
-                      const std::string& canonical_hdrs,
-                      const std::string_view& signed_hdrs,
-                      const std::string_view& request_payload_hash,
-                      const DoutPrefixProvider *dpp)
-{
-  ldpp_dout(dpp, 10) << "payload request hash = " << request_payload_hash << dendl;
+sha256_digest_t get_v4_canon_req_hash(
+    CephContext *cct, const std::string_view &http_verb,
+    const std::string &canonical_uri, const std::string &canonical_qs,
+    const std::string &canonical_hdrs, const std::string_view &signed_hdrs,
+    const std::string_view &request_payload_hash,
+    const DoutPrefixProvider *dpp) {
+  // Simplified logging - only log key-marker if present
+  if (canonical_qs.find("key-marker=") != std::string::npos) {
+    size_t marker_pos = canonical_qs.find("key-marker=");
+    size_t marker_end = canonical_qs.find('&', marker_pos);
+    std::string key_marker = (marker_end != std::string::npos) 
+        ? canonical_qs.substr(marker_pos, marker_end - marker_pos)
+        : canonical_qs.substr(marker_pos);
+    ldpp_dout(dpp, 0) << "[SERVER] Processing request with " << key_marker << dendl;
+  }
 
-  const auto canonical_req = string_join_reserve("\n",
-    http_verb,
-    canonical_uri,
-    canonical_qs,
-    canonical_hdrs,
-    signed_hdrs,
-    request_payload_hash);
+  const auto canonical_req =
+      string_join_reserve("\n", http_verb, canonical_uri, canonical_qs,
+                          canonical_hdrs, signed_hdrs, request_payload_hash);
+
+  // Only log canonical request in debug mode
+  ldpp_dout(dpp, 10) << "canonical request = " << canonical_req << dendl;
 
   const auto canonical_req_hash = calc_hash_sha256(canonical_req);
 
   using sanitize = rgw::crypt_sanitize::log_content;
-  ldpp_dout(dpp, 10) << "canonical request = " << sanitize{canonical_req} << dendl;
-  ldpp_dout(dpp, 10) << "canonical request hash = "
-                 << canonical_req_hash << dendl;
+  ldpp_dout(dpp, 0) << "[SERVER] canonical_request_hash = " << canonical_req_hash << dendl;
 
   return canonical_req_hash;
 }
@@ -904,35 +916,28 @@ get_v4_canon_req_hash(CephContext* cct,
  * http://docs.aws.amazon.com/general/latest/gr/sigv4-create-string-to-sign.html
  */
 AWSEngine::VersionAbstractor::string_to_sign_t
-get_v4_string_to_sign(CephContext* const cct,
-                      const std::string_view& algorithm,
-                      const std::string_view& request_date,
-                      const std::string_view& credential_scope,
-                      const sha256_digest_t& canonreq_hash,
-                      const DoutPrefixProvider *dpp)
-{
+get_v4_string_to_sign(CephContext *const cct, const std::string_view &algorithm,
+                      const std::string_view &request_date,
+                      const std::string_view &credential_scope,
+                      const sha256_digest_t &canonreq_hash,
+                      const DoutPrefixProvider *dpp) {
   const auto hexed_cr_hash = canonreq_hash.to_str();
   const std::string_view hexed_cr_hash_str(hexed_cr_hash);
 
-  const auto string_to_sign = string_join_reserve("\n",
-    algorithm,
-    request_date,
-    credential_scope,
-    hexed_cr_hash_str);
+  const auto string_to_sign = string_join_reserve(
+      "\n", algorithm, request_date, credential_scope, hexed_cr_hash_str);
 
   ldpp_dout(dpp, 10) << "string to sign = "
-                 << rgw::crypt_sanitize::log_content{string_to_sign}
-                 << dendl;
+                     << rgw::crypt_sanitize::log_content{string_to_sign}
+                     << dendl;
 
   return string_to_sign;
 }
 
-
-static inline std::tuple<std::string_view,            /* date */
-                         std::string_view,            /* region */
-                         std::string_view>            /* service */
-parse_cred_scope(std::string_view credential_scope)
-{
+static inline std::tuple<std::string_view, /* date */
+                         std::string_view, /* region */
+                         std::string_view> /* service */
+parse_cred_scope(std::string_view credential_scope) {
   /* date cred */
   size_t pos = credential_scope.find("/");
   const auto date_cs = credential_scope.substr(0, pos);
@@ -951,10 +956,9 @@ parse_cred_scope(std::string_view credential_scope)
 }
 
 static inline std::vector<unsigned char>
-transform_secret_key(const std::string_view& secret_access_key)
-{
+transform_secret_key(const std::string_view &secret_access_key) {
   /* TODO(rzarzynski): switch to constexpr when C++14 becomes available. */
-  static const std::initializer_list<unsigned char> AWS4 { 'A', 'W', 'S', '4' };
+  static const std::initializer_list<unsigned char> AWS4{'A', 'W', 'S', '4'};
 
   /* boost::container::small_vector might be used here if someone wants to
    * optimize out even more dynamic allocations. */
@@ -965,8 +969,8 @@ transform_secret_key(const std::string_view& secret_access_key)
   for (const auto c : secret_access_key) {
     std::array<unsigned char, MAX_UTF8_SZ> buf;
     const size_t n = encode_utf8(c, buf.data());
-    secret_key_utf8.insert(std::end(secret_key_utf8),
-                           std::begin(buf), std::begin(buf) + n);
+    secret_key_utf8.insert(std::end(secret_key_utf8), std::begin(buf),
+                           std::begin(buf) + n);
   }
 
   return secret_key_utf8;
@@ -975,12 +979,9 @@ transform_secret_key(const std::string_view& secret_access_key)
 /*
  * calculate the SigningKey of AWS auth version 4
  */
-static sha256_digest_t
-get_v4_signing_key(CephContext* const cct,
-                   const std::string_view& credential_scope,
-                   const std::string_view& secret_access_key,
-                   const DoutPrefixProvider *dpp)
-{
+static sha256_digest_t get_v4_signing_key(
+    CephContext *const cct, const std::string_view &credential_scope,
+    const std::string_view &secret_access_key, const DoutPrefixProvider *dpp) {
   std::string_view date, region, service;
   std::tie(date, region, service) = parse_cred_scope(credential_scope);
 
@@ -990,8 +991,8 @@ get_v4_signing_key(CephContext* const cct,
   const auto service_k = calc_hmac_sha256(region_k, service);
 
   /* aws4_request */
-  const auto signing_key = calc_hmac_sha256(service_k,
-                                            std::string_view("aws4_request"));
+  const auto signing_key =
+      calc_hmac_sha256(service_k, std::string_view("aws4_request"));
 
   ldpp_dout(dpp, 10) << "date_k    = " << date_k << dendl;
   ldpp_dout(dpp, 10) << "region_k  = " << region_k << dendl;
@@ -1010,13 +1011,11 @@ get_v4_signing_key(CephContext* const cct,
  * it to keep everything within the stack boundaries instead of doing
  * dynamic allocations.
  */
-AWSEngine::VersionAbstractor::server_signature_t
-get_v4_signature(const std::string_view& credential_scope,
-                 CephContext* const cct,
-                 const std::string_view& secret_key,
-                 const AWSEngine::VersionAbstractor::string_to_sign_t& string_to_sign,
-                 const DoutPrefixProvider *dpp)
-{
+AWSEngine::VersionAbstractor::server_signature_t get_v4_signature(
+    const std::string_view &credential_scope, CephContext *const cct,
+    const std::string_view &secret_key,
+    const AWSEngine::VersionAbstractor::string_to_sign_t &string_to_sign,
+    const DoutPrefixProvider *dpp) {
   auto signing_key = get_v4_signing_key(cct, credential_scope, secret_key, dpp);
 
   /* The server-side generated digest for comparison. */
@@ -1034,11 +1033,9 @@ get_v4_signature(const std::string_view& credential_scope,
   return signature;
 }
 
-AWSEngine::VersionAbstractor::server_signature_t
-get_v2_signature(CephContext* const cct,
-                 const std::string& secret_key,
-                 const AWSEngine::VersionAbstractor::string_to_sign_t& string_to_sign)
-{
+AWSEngine::VersionAbstractor::server_signature_t get_v2_signature(
+    CephContext *const cct, const std::string &secret_key,
+    const AWSEngine::VersionAbstractor::string_to_sign_t &string_to_sign) {
   if (secret_key.empty()) {
     throw -EINVAL;
   }
@@ -1047,10 +1044,10 @@ get_v2_signature(CephContext* const cct,
 
   /* 64 is really enough */;
   char buf[64];
-  const int ret = ceph_armor(std::begin(buf),
-                             std::begin(buf) + 64,
-                             reinterpret_cast<const char *>(digest.v),
-                             reinterpret_cast<const char *>(digest.v + digest.SIZE));
+  const int ret =
+      ceph_armor(std::begin(buf), std::begin(buf) + 64,
+                 reinterpret_cast<const char *>(digest.v),
+                 reinterpret_cast<const char *>(digest.v + digest.SIZE));
   if (ret < 0) {
     ldout(cct, 10) << "ceph_armor failed" << dendl;
     throw ret;
@@ -1061,13 +1058,12 @@ get_v2_signature(CephContext* const cct,
   }
 }
 
-bool AWSv4ComplMulti::ChunkMeta::is_new_chunk_in_stream(size_t stream_pos) const
-{
+bool AWSv4ComplMulti::ChunkMeta::is_new_chunk_in_stream(
+    size_t stream_pos) const {
   return stream_pos >= (data_offset_in_stream + data_length);
 } /* ChunkMeta::is_new_chunk_in_stream */
 
-size_t AWSv4ComplMulti::ChunkMeta::get_data_size(size_t stream_pos) const
-{
+size_t AWSv4ComplMulti::ChunkMeta::get_data_size(size_t stream_pos) const {
   if (stream_pos > (data_offset_in_stream + data_length)) {
     /* Data in parsing_buf. */
     return data_length;
@@ -1078,38 +1074,37 @@ size_t AWSv4ComplMulti::ChunkMeta::get_data_size(size_t stream_pos) const
 
 /* AWSv4 completers begin. */
 std::pair<AWSv4ComplMulti::ChunkMeta, size_t /* consumed */>
-AWSv4ComplMulti::ChunkMeta::create_next(CephContext* const cct,
-                                        ChunkMeta&& old,
-                                        const char* const metabuf,
+AWSv4ComplMulti::ChunkMeta::create_next(CephContext *const cct, ChunkMeta &&old,
+                                        const char *const metabuf,
                                         const size_t metabuf_len,
-					uint32_t flags)
-{
+                                        uint32_t flags) {
   std::string_view metastr(metabuf, metabuf_len);
 
   bool unsigned_chunked = flags & AWSv4ComplMulti::FLAG_UNSIGNED_CHUNKED;
   bool expect_chunk_signature = !unsigned_chunked; // for now
 
-  ldout(cct, 20) << "AWSv4ComplMulti::create_next() old.cnt: " << old.cnt << dendl;
+  ldout(cct, 20) << "AWSv4ComplMulti::create_next() old.cnt: " << old.cnt
+                 << dendl;
 
-  char* data_field_end;
+  char *data_field_end;
   /* strtoull ignores the "\r\n" sequence after each non-first chunk. */
   const size_t data_length = std::strtoull(metabuf, &data_field_end, 16);
   if (data_length == 0 && data_field_end == metabuf) {
-    ldout(cct, 20) << "AWSv4ComplMulti: cannot parse the data size"
-                   << dendl;
+    ldout(cct, 20) << "AWSv4ComplMulti: cannot parse the data size" << dendl;
     throw rgw::io::Exception(EINVAL, std::system_category());
   }
 
   if (expect_chunk_signature) {
 
     /* traditional parse looks for
-       string(IntHexBase(chunk-size)) + ";chunk-signature=" + signature + \r\n + chunk-data + \r\n
-       cf. https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-streaming.html */
+       string(IntHexBase(chunk-size)) + ";chunk-signature=" + signature + \r\n +
+       chunk-data + \r\n cf.
+       https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-streaming.html */
 
     const size_t semicolon_pos = metastr.find(";");
     if (semicolon_pos == std::string_view::npos) {
       ldout(cct, 20) << "AWSv4ComplMulti cannot find the ';' separator"
-		     << dendl;
+                     << dendl;
       throw rgw::io::Exception(EINVAL, std::system_category());
     }
 
@@ -1146,15 +1141,13 @@ AWSv4ComplMulti::ChunkMeta::create_next(CephContext* const cct,
                    << ", data_starts_in_stream=" << data_starts_in_stream
                    << dendl;
 
-    return std::make_pair(
-	     ChunkMeta(data_starts_in_stream, data_length, signature, flags,
-		       ++old.cnt),
-	     semicolon_pos + 83);
+    return std::make_pair(ChunkMeta(data_starts_in_stream, data_length,
+                                    signature, flags, ++old.cnt),
+                          semicolon_pos + 83);
   } else {
     /* no-chunk-signature aws-chunked */
     ldout(cct, 20) << "AWSv4ComplMulti: non-signature meta chunk; data_length "
-		   << data_length
-		   << dendl;
+                   << data_length << dendl;
 
     /* currently we might see "\r\n20000\r\nreate the directory..." */
     size_t crlf_pos = metastr.find("\r\n");
@@ -1171,24 +1164,19 @@ AWSv4ComplMulti::ChunkMeta::create_next(CephContext* const cct,
     const size_t data_starts_in_stream =
         consumed + old.data_offset_in_stream + old.data_length;
     return std::make_pair(ChunkMeta(data_starts_in_stream, data_length,
-			    "" /* signature */, flags, ++old.cnt),
+                                    "" /* signature */, flags, ++old.cnt),
                           consumed);
   } /* no-signature */
 } /* AWSv4ComplMulti::ChunkMeta::create_next */
 
 std::string
-AWSv4ComplMulti::calc_chunk_signature(const std::string& payload_hash) const
-{
-  const auto string_to_sign = string_join_reserve("\n",
-    AWS4_HMAC_SHA256_PAYLOAD_STR,
-    date,
-    credential_scope,
-    prev_chunk_signature,
-    AWS4_EMPTY_PAYLOAD_HASH,
-    payload_hash);
+AWSv4ComplMulti::calc_chunk_signature(const std::string &payload_hash) const {
+  const auto string_to_sign = string_join_reserve(
+      "\n", AWS4_HMAC_SHA256_PAYLOAD_STR, date, credential_scope,
+      prev_chunk_signature, AWS4_EMPTY_PAYLOAD_HASH, payload_hash);
 
-  ldout(cct(), 20) << "AWSv4ComplMulti: string_to_sign=\n" << string_to_sign
-                 << dendl;
+  ldout(cct(), 20) << "AWSv4ComplMulti: string_to_sign=\n"
+                   << string_to_sign << dendl;
 
   /* new chunk signature */
   const auto sig = calc_hmac_sha256(signing_key, string_to_sign);
@@ -1196,13 +1184,12 @@ AWSv4ComplMulti::calc_chunk_signature(const std::string& payload_hash) const
   return sig.to_str();
 }
 
-bool AWSv4ComplMulti::is_signature_mismatched()
-{
+bool AWSv4ComplMulti::is_signature_mismatched() {
   /* in streaming unsigned payload, there are no chunk signatures nor trailer
    * signature; there may be a trailing checksum
    *
-   * if (flags & FLAG_UNSIGNED_CHUNKED), then we assert chunk_meta.signature.empty(),
-   * and conversely
+   * if (flags & FLAG_UNSIGNED_CHUNKED), then we assert
+   * chunk_meta.signature.empty(), and conversely
    */
   if (flags & FLAG_UNSIGNED_CHUNKED) {
     return false;
@@ -1215,11 +1202,11 @@ bool AWSv4ComplMulti::is_signature_mismatched()
 
   if (cct()->_conf->subsys.should_gather(ceph_subsys_rgw, 16)) [[unlikely]] {
     ldout(cct(), 16) << "AWSv4ComplMulti: declared signature="
-		     << chunk_meta.get_signature()
-		     << "\nAWSv4ComplMulti: calculated signature="
-		     << calc_signature << dendl;
+                     << chunk_meta.get_signature()
+                     << "\nAWSv4ComplMulti: calculated signature="
+                     << calc_signature << dendl;
     ldout(cct(), 16) << "AWSv4ComplMulti: prev_chunk_signature="
-		     << prev_chunk_signature << dendl;
+                     << prev_chunk_signature << dendl;
   }
 
   auto match_signatures = [&]() -> bool {
@@ -1231,9 +1218,9 @@ bool AWSv4ComplMulti::is_signature_mismatched()
     return chunk_meta.get_signature() == calc_signature;
   };
 
-  if (! match_signatures()) [[unlikely]] {
+  if (!match_signatures()) [[unlikely]] {
     ldout(cct(), 16) << "AWSv4ComplMulti: ERROR: chunk signature mismatch"
-                   << dendl;
+                     << dendl;
     return true;
   } else {
     prev_chunk_signature = chunk_meta.get_signature();
@@ -1241,9 +1228,9 @@ bool AWSv4ComplMulti::is_signature_mismatched()
   }
 } /* AWSv4ComplMulti::is_signature_mismatched */
 
-AWSv4ComplMulti::ReceiveChunkResult AWSv4ComplMulti::recv_chunk(
-  char* const buf, const size_t buf_max, uint32_t cnt, bool& eof)
-{
+AWSv4ComplMulti::ReceiveChunkResult
+AWSv4ComplMulti::recv_chunk(char *const buf, const size_t buf_max, uint32_t cnt,
+                            bool &eof) {
   /* Buffer stores only parsed stream. Raw values reflect the stream
    * we're getting from a client. */
   size_t buf_pos = 0;
@@ -1269,19 +1256,14 @@ AWSv4ComplMulti::ReceiveChunkResult AWSv4ComplMulti::recv_chunk(
       auto pb_size = parsing_buf.size();
       auto pb_capacity = parsing_buf.capacity();
 
-      const size_t received = io_base_t::recv_body(parsing_buf.data() + orig_size,
-                                                   to_extract);
+      const size_t received =
+          io_base_t::recv_body(parsing_buf.data() + orig_size, to_extract);
 
       ldout(cct(), 20) << "AWSv4ComplMulti::recv_chunk() "
-		     << "after io_base_t::recv_body recv pb_size: "
-		     << pb_size
-		     << " pb_capacity "
-		     << pb_capacity
-		     << " to_extract: "
-		     << to_extract
-		     << " received: "
-		     << received
-		     << dendl;
+                       << "after io_base_t::recv_body recv pb_size: " << pb_size
+                       << " pb_capacity " << pb_capacity
+                       << " to_extract: " << to_extract
+                       << " received: " << received << dendl;
 
       parsing_buf.resize(parsing_buf.size() - (to_extract - received));
       if (received == 0) {
@@ -1294,9 +1276,9 @@ AWSv4ComplMulti::ReceiveChunkResult AWSv4ComplMulti::recv_chunk(
     } while (to_extract > 0);
 
     size_t consumed;
-    std::tie(chunk_meta, consumed) = \
-      ChunkMeta::create_next(cct(), std::move(chunk_meta),
-	 parsing_buf.data(), parsing_buf.size(), flags);
+    std::tie(chunk_meta, consumed) =
+        ChunkMeta::create_next(cct(), std::move(chunk_meta), parsing_buf.data(),
+                               parsing_buf.size(), flags);
 
     /* We can drop the bytes consumed during metadata parsing. The remainder
      * can be chunk's data plus possibly beginning of next chunks' metadata. */
@@ -1306,10 +1288,11 @@ AWSv4ComplMulti::ReceiveChunkResult AWSv4ComplMulti::recv_chunk(
 
   size_t stream_pos_was = stream_pos - parsing_buf.size();
 
-  size_t to_extract = \
-    std::min(chunk_meta.get_data_size(stream_pos_was), buf_max);
-  dout(30) << "AWSv4ComplMulti: stream_pos_was=" << stream_pos_was << ", to_extract=" << to_extract << dendl;
-  
+  size_t to_extract =
+      std::min(chunk_meta.get_data_size(stream_pos_was), buf_max);
+  dout(30) << "AWSv4ComplMulti: stream_pos_was=" << stream_pos_was
+           << ", to_extract=" << to_extract << dendl;
+
   /* It's quite probable we have a couple of real data bytes stored together
    * with meta-data in the parsing_buf. We need to extract them and move to
    * the final buffer. This is a trade-off between frontend's read overhead
@@ -1320,8 +1303,7 @@ AWSv4ComplMulti::ReceiveChunkResult AWSv4ComplMulti::recv_chunk(
     const auto data_end_iter = std::begin(parsing_buf) + data_len;
 
     dout(30) << "AWSv4ComplMulti: to_extract=" << to_extract
-	     << ", data_len=" << data_len
-	     << dendl;
+             << ", data_len=" << data_len << dendl;
 
     /* if is-last-frag, then */
     lf_bytes = stream_pos - stream_pos_was - data_len;
@@ -1339,7 +1321,8 @@ AWSv4ComplMulti::ReceiveChunkResult AWSv4ComplMulti::recv_chunk(
    * buffering. */
   while (to_extract > 0) {
     const size_t received = io_base_t::recv_body(buf + buf_pos, to_extract);
-    dout(30) << "AWSv4ComplMulti: to_extract=" << to_extract << ", received=" << received << dendl;
+    dout(30) << "AWSv4ComplMulti: to_extract=" << to_extract
+             << ", received=" << received << dendl;
 
     if (received == 0) {
       eof = true;
@@ -1357,35 +1340,26 @@ AWSv4ComplMulti::ReceiveChunkResult AWSv4ComplMulti::recv_chunk(
   return ReceiveChunkResult(buf_pos, chunk_meta.get_offset());
 } /* AWSv4Complmulti::recv_chunk */
 
-std::string
-AWSv4ComplMulti::calc_v4_trailer_signature(const trailer_map_t& trailer_map,
-					   const std::string_view last_chunk_sig)
-{
+std::string AWSv4ComplMulti::calc_v4_trailer_signature(
+    const trailer_map_t &trailer_map, const std::string_view last_chunk_sig) {
   const auto headers = get_canon_amz_hdrs(trailer_map);
   const auto canon_header_hash = calc_hash_sha256(headers);
 
-  const auto string_to_sign = string_join_reserve("\n",
-    "AWS4-HMAC-SHA256-TRAILER",
-    date,
-    credential_scope,
-    last_chunk_sig,
-    canon_header_hash.to_str());
+  const auto string_to_sign = string_join_reserve(
+      "\n", "AWS4-HMAC-SHA256-TRAILER", date, credential_scope, last_chunk_sig,
+      canon_header_hash.to_str());
 
   const auto trailer_signature =
-    calc_hmac_sha256(signing_key, string_to_sign).to_str();
+      calc_hmac_sha256(signing_key, string_to_sign).to_str();
 
   ldout(cct(), 10) << "trailer headers = " << headers
-		 << "\ntrailers string to sign = "
-                 << rgw::crypt_sanitize::log_content{string_to_sign}
-		 << "\ncalc trailer signature = "
-		 << trailer_signature
-		 << "\nexpected last-chunk-sig = "
-		 << last_chunk_sig
-		 << dendl;
+                   << "\ntrailers string to sign = "
+                   << rgw::crypt_sanitize::log_content{string_to_sign}
+                   << "\ncalc trailer signature = " << trailer_signature
+                   << "\nexpected last-chunk-sig = " << last_chunk_sig << dendl;
 
   return trailer_signature;
 } /* calc_v4_trailer_signature */
-
 
 /* the following templates capture the start (and for extract_helper)
  * end boundaries of a substring match as constant strings, moving
@@ -1393,21 +1367,18 @@ AWSv4ComplMulti::calc_v4_trailer_signature(const trailer_map_t& trailer_map,
 
 using ExtractResult = std::tuple<bool, std::string_view, size_t>;
 
-/* adapted from here: https://ctrpeach.io/posts/cpp20-string-literal-template-parameters/ */
-template<size_t N>
-struct StringLiteral {
-    constexpr StringLiteral(const char (&str)[N]) {
-        std::copy_n(str, N, val);
-    }
-    char val[N];
+/* adapted from here:
+ * https://ctrpeach.io/posts/cpp20-string-literal-template-parameters/ */
+template <size_t N> struct StringLiteral {
+  constexpr StringLiteral(const char (&str)[N]) { std::copy_n(str, N, val); }
+  char val[N];
 };
 
 template <StringLiteral start, StringLiteral end>
-static inline ExtractResult mut_extract_helper(std::string_view& region) {
-  if (auto spos = region.find(start.val);
-      spos != std::string_view::npos) {
+static inline ExtractResult mut_extract_helper(std::string_view &region) {
+  if (auto spos = region.find(start.val); spos != std::string_view::npos) {
     if (auto epos = region.find(end.val, spos + sarrlen(start.val));
-	epos != std::string_view::npos) {
+        epos != std::string_view::npos) {
       std::string_view matched = region.substr(spos, epos - spos);
       auto consumed = matched.size() + sarrlen(end.val);
       region.remove_prefix(consumed);
@@ -1418,12 +1389,11 @@ static inline ExtractResult mut_extract_helper(std::string_view& region) {
 } /* mut_extract_helper <begin, end> */
 
 template <StringLiteral end>
-static inline ExtractResult extract_helper(const std::string_view& region,
-					   const std::string_view start) {
-  if (auto spos = region.find(start);
-      spos != std::string_view::npos) {
+static inline ExtractResult extract_helper(const std::string_view &region,
+                                           const std::string_view start) {
+  if (auto spos = region.find(start); spos != std::string_view::npos) {
     if (auto epos = region.find(end.val, spos + start.length());
-	epos != std::string_view::npos) {
+        epos != std::string_view::npos) {
       std::string_view matched = region.substr(spos, epos - spos);
       auto consumed = matched.size() + sarrlen(end.val);
       return ExtractResult(true, matched, consumed);
@@ -1432,12 +1402,10 @@ static inline ExtractResult extract_helper(const std::string_view& region,
   return ExtractResult(false, "", 0);
 } /* extract_helper <end> */
 
-using split_func_t =
-  const fu2::unique_function<void(const std::string_view k,
-				  const std::string_view v) const>;
+using split_func_t = const fu2::unique_function<void(
+    const std::string_view k, const std::string_view v) const>;
 
-static inline void split_header(const std::string_view hdr, split_func_t f)
-{
+static inline void split_header(const std::string_view hdr, split_func_t f) {
   auto kv = ceph::split(hdr, ":");
   auto k = kv.begin();
   if (k != kv.end()) {
@@ -1449,9 +1417,8 @@ static inline void split_header(const std::string_view hdr, split_func_t f)
 } /* split_header */
 
 inline void AWSv4ComplMulti::extract_trailing_headers(
-  std::string_view x_amz_trailer, std::string_view& mut_sv_trailer,
-  AWSv4ComplMulti::trailer_map_t& trailer_map)
-{
+    std::string_view x_amz_trailer, std::string_view &mut_sv_trailer,
+    AWSv4ComplMulti::trailer_map_t &trailer_map) {
   using std::get;
   size_t consumed = 0;
   /* spliterate x_amz_trailer */
@@ -1462,35 +1429,41 @@ inline void AWSv4ComplMulti::extract_trailing_headers(
     auto ex_header = extract_helper<"\r\n">(mut_sv_trailer, *k);
     if (get<0>(ex_header)) {
       auto header = get<1>(ex_header);
-      split_header(header, [&](const std::string_view k, const std::string_view v) -> void {
-	if (cct()->_conf->subsys.should_gather(ceph_subsys_rgw, 10)) [[unlikely]] {
-	  ldout(cct(), 10) << fmt::format("\nextracted trailing header {}={}", k, v) << dendl;
-	}
-	/* populate trailer map with expected headers and their values, if sent */
-	trailer_map.insert(trailer_map_t::value_type(k, v));
-	/* populate to req_info.env as well */
-	put_prop(ys_header_mangle(k), v);
-      });
+      split_header(
+          header,
+          [&](const std::string_view k, const std::string_view v) -> void {
+            if (cct()->_conf->subsys.should_gather(ceph_subsys_rgw, 10))
+                [[unlikely]] {
+              ldout(cct(), 10)
+                  << fmt::format("\nextracted trailing header {}={}", k, v)
+                  << dendl;
+            }
+            /* populate trailer map with expected headers and their values, if
+             * sent */
+            trailer_map.insert(trailer_map_t::value_type(k, v));
+            /* populate to req_info.env as well */
+            put_prop(ys_header_mangle(k), v);
+          });
       consumed += get<2>(ex_header);
     } /* one trailer */
-  } /* foreach trailer */
+  }   /* foreach trailer */
   /* advance mut_sv_trailer */
   mut_sv_trailer.remove_prefix(consumed);
 } /* AWSv4complmulti::extract_trailing_headers */
 
-size_t AWSv4ComplMulti::recv_body(char* const buf, const size_t buf_max)
-{
+size_t AWSv4ComplMulti::recv_body(char *const buf, const size_t buf_max) {
   using std::get;
 
   bool eof = false;
   size_t total = 0;
 
-  ldout(cct(), 20) << "AWSv4ComplMulti::recv_body() buf_max: " << buf_max << dendl;
+  ldout(cct(), 20) << "AWSv4ComplMulti::recv_body() buf_max: " << buf_max
+                   << dendl;
 
   uint32_t cnt = 0;
   while (total < buf_max && !eof) {
     ReceiveChunkResult rcr =
-      recv_chunk(buf + total, buf_max - total, cnt++, eof);
+        recv_chunk(buf + total, buf_max - total, cnt++, eof);
     total += rcr.received;
   }
 
@@ -1498,10 +1471,10 @@ size_t AWSv4ComplMulti::recv_body(char* const buf, const size_t buf_max)
   return total;
 }
 
-void AWSv4ComplMulti::modify_request_state(const DoutPrefixProvider* dpp, req_state* const s_rw)
-{
-  const char* const decoded_length = \
-    s_rw->info.env->get("HTTP_X_AMZ_DECODED_CONTENT_LENGTH");
+void AWSv4ComplMulti::modify_request_state(const DoutPrefixProvider *dpp,
+                                           req_state *const s_rw) {
+  const char *const decoded_length =
+      s_rw->info.env->get("HTTP_X_AMZ_DECODED_CONTENT_LENGTH");
 
   if (!decoded_length) {
     throw -EINVAL;
@@ -1511,43 +1484,37 @@ void AWSv4ComplMulti::modify_request_state(const DoutPrefixProvider* dpp, req_st
     s_rw->content_length = parse_content_length(decoded_length);
 
     if (s_rw->content_length < 0) {
-      ldpp_dout(dpp, 10) << "negative AWSv4's content length, aborting" << dendl;
+      ldpp_dout(dpp, 10) << "negative AWSv4's content length, aborting"
+                         << dendl;
       throw -EINVAL;
     }
   }
 
   /* Install the filter over rgw::io::RestfulClient. */
   AWS_AUTHv4_IO(s_rw)->add_filter(
-    std::static_pointer_cast<io_base_t>(shared_from_this()));
+      std::static_pointer_cast<io_base_t>(shared_from_this()));
 }
 
-bool AWSv4ComplMulti::complete()
-{
+bool AWSv4ComplMulti::complete() {
   /* historically, this code has been validating not the final zero-length
    * chunk, but the one before that; we'll do that as before, and then
    * consume the last chunk signature and the trailer section */
   if (is_signature_mismatched()) {
     ldout(cct(), 10) << "ERROR: signature of last payload chunk does not match"
-                   << dendl;
+                     << dendl;
     return false;
   } else {
     /* now it's time to verify the signature of the last, zero-length chunk */
-    const auto string_to_sign = string_join_reserve("\n",
-    "AWS4-HMAC-SHA256-PAYLOAD",
-    date,
-    credential_scope,
-    prev_chunk_signature,
-    AWS4_EMPTY_PAYLOAD_HASH,
-    AWS4_EMPTY_PAYLOAD_HASH);
+    const auto string_to_sign = string_join_reserve(
+        "\n", "AWS4-HMAC-SHA256-PAYLOAD", date, credential_scope,
+        prev_chunk_signature, AWS4_EMPTY_PAYLOAD_HASH, AWS4_EMPTY_PAYLOAD_HASH);
 
     const auto final_chunk_signature =
-      calc_hmac_sha256(signing_key, string_to_sign).to_str();
+        calc_hmac_sha256(signing_key, string_to_sign).to_str();
 
-    ldout(cct(), 10) << "final chunk signature = "
-		     << final_chunk_signature
-		     << "\nprev_chunk_signature was "
-		     << prev_chunk_signature
-		     << dendl;
+    ldout(cct(), 10) << "final chunk signature = " << final_chunk_signature
+                     << "\nprev_chunk_signature was " << prev_chunk_signature
+                     << dendl;
 
     /* in the last-chunk case, parsing_buf potentially holds unconsumed
      * data, including the final chunk boundary */
@@ -1563,9 +1530,8 @@ bool AWSv4ComplMulti::complete()
     tbuf_pos += lf_bytes;
 
     while (tbuf_pos < trailer_buf_size) {
-      const size_t received =
-          io_base_t::recv_body(trailer_vec.data() + tbuf_pos,
-			       trailer_buf_size - tbuf_pos - 1);
+      const size_t received = io_base_t::recv_body(
+          trailer_vec.data() + tbuf_pos, trailer_buf_size - tbuf_pos - 1);
       dout(30) << "AWSv4ComplMulti: recv trailer received=" << received
                << dendl;
       if (received == 0) {
@@ -1575,10 +1541,9 @@ bool AWSv4ComplMulti::complete()
     }
 
     if (tbuf_pos == trailer_buf_size) {
-      ldout(cct(), 10) << "AWSv4ComplMulti:: recv trailer exceeded size limit of "
-		       << trailer_buf_size - 1
-		       << " bytes"
-		       << dendl;
+      ldout(cct(), 10)
+          << "AWSv4ComplMulti:: recv trailer exceeded size limit of "
+          << trailer_buf_size - 1 << " bytes" << dendl;
       throw rgw::io::Exception(ERR_LIMIT_EXCEEDED, std::system_category());
     }
 
@@ -1591,21 +1556,22 @@ bool AWSv4ComplMulti::complete()
      * no-trailer-signature case--but assume "0" might be possible.
      * The logic below handles all 4 cases. */
     if (tbuf_pos > sarrlen("\r\n0")) {
-      const char* tv_data = trailer_vec.data();
+      const char *tv_data = trailer_vec.data();
       auto trailer_off = 0;
       if (*(tv_data + trailer_off) == '\r') {
-	trailer_off += 2;
+        trailer_off += 2;
       }
       if (*(tv_data + trailer_off) == '0') {
-	++trailer_off;
+        ++trailer_off;
       }
       if (*(tv_data + trailer_off) == ';') {
-	++trailer_off;
+        ++trailer_off;
       }
-      const std::string_view sv_trailer(
-        trailer_vec.data() + trailer_off, tbuf_pos - trailer_off);
+      const std::string_view sv_trailer(trailer_vec.data() + trailer_off,
+                                        tbuf_pos - trailer_off);
 
-      if (cct()->_conf->subsys.should_gather(ceph_subsys_rgw, 10)) [[unlikely]] {
+      if (cct()->_conf->subsys.should_gather(ceph_subsys_rgw, 10))
+          [[unlikely]] {
         ldout(cct(), 10) << "trailer_section: " << sv_trailer << dendl;
       }
 
@@ -1650,11 +1616,11 @@ bool AWSv4ComplMulti::complete()
                          << "\n trailer bytes remaining/not consumed: "
                          << mut_sv_trailer << dendl;
       } /* matched trailer signature */
-    } /* have trailer */
+    }   /* have trailer */
 
     if (expect_trailer_signature() &&
-	(expected_trailer_signature.empty() ||
-	 (calculated_trailer_signature != expected_trailer_signature))) {
+        (expected_trailer_signature.empty() ||
+         (calculated_trailer_signature != expected_trailer_signature))) {
       throw rgw::io::Exception(ERR_SIGNATURE_NO_MATCH, std::system_category());
     }
 
@@ -1663,13 +1629,10 @@ bool AWSv4ComplMulti::complete()
 } /* AWSv4Complmulti:: complete */
 
 rgw::auth::Completer::cmplptr_t
-AWSv4ComplMulti::create(const req_state* const s,
-                        std::string_view date,
+AWSv4ComplMulti::create(const req_state *const s, std::string_view date,
                         std::string_view credential_scope,
-                        std::string_view seed_signature,
-			uint32_t flags,
-                        const boost::optional<std::string>& secret_key)
-{
+                        std::string_view seed_signature, uint32_t flags,
+                        const boost::optional<std::string> &secret_key) {
   if (!secret_key) {
     /* Some external authorizers (like Keystone) aren't fully compliant with
      * AWSv4. They do not provide the secret_key which is necessary to handle
@@ -1677,34 +1640,29 @@ AWSv4ComplMulti::create(const req_state* const s,
     throw -ERR_NOT_IMPLEMENTED;
   }
 
-  const auto signing_key = \
-    rgw::auth::s3::get_v4_signing_key(s->cct, credential_scope, *secret_key, s);
+  const auto signing_key = rgw::auth::s3::get_v4_signing_key(
+      s->cct, credential_scope, *secret_key, s);
 
-  return std::make_shared<AWSv4ComplMulti>(s,
-                                           std::move(date),
-                                           std::move(credential_scope),
-                                           std::move(seed_signature),
-					   flags,
-                                           signing_key);
+  return std::make_shared<AWSv4ComplMulti>(
+      s, std::move(date), std::move(credential_scope),
+      std::move(seed_signature), flags, signing_key);
 }
 
-size_t AWSv4ComplSingle::recv_body(char* const buf, const size_t max)
-{
+size_t AWSv4ComplSingle::recv_body(char *const buf, const size_t max) {
   const auto received = io_base_t::recv_body(buf, max);
   calc_hash_sha256_update_stream(sha256_hash, buf, received);
 
   return received;
 }
 
-void AWSv4ComplSingle::modify_request_state(const DoutPrefixProvider* dpp, req_state* const s_rw)
-{
+void AWSv4ComplSingle::modify_request_state(const DoutPrefixProvider *dpp,
+                                            req_state *const s_rw) {
   /* Install the filter over rgw::io::RestfulClient. */
   AWS_AUTHv4_IO(s_rw)->add_filter(
-    std::static_pointer_cast<io_base_t>(shared_from_this()));
+      std::static_pointer_cast<io_base_t>(shared_from_this()));
 }
 
-bool AWSv4ComplSingle::complete()
-{
+bool AWSv4ComplSingle::complete() {
   /* The completer is only for the cases where signed payload has been
    * requested. It won't be used, for instance, during the query string-based
    * authentication. */
@@ -1714,27 +1672,23 @@ bool AWSv4ComplSingle::complete()
   if (payload_hash.compare(expected_request_payload_hash) == 0) {
     return true;
   } else {
-    ldout(cct, 10) << "ERROR: x-amz-content-sha256 does not match"
+    ldout(cct, 10) << "ERROR: x-amz-content-sha256 does not match" << dendl;
+    ldout(cct, 10) << "ERROR:   grab_aws4_sha256_hash()=" << payload_hash
                    << dendl;
-    ldout(cct, 10) << "ERROR:   grab_aws4_sha256_hash()="
-                   << payload_hash << dendl;
     ldout(cct, 10) << "ERROR:   expected_request_payload_hash="
                    << expected_request_payload_hash << dendl;
     return false;
   }
 }
 
-AWSv4ComplSingle::AWSv4ComplSingle(const req_state* const s)
-  : io_base_t(nullptr),
-    cct(s->cct),
-    expected_request_payload_hash(get_v4_exp_payload_hash(s->info)),
-    sha256_hash(calc_hash_sha256_open_stream()) {
-}
+AWSv4ComplSingle::AWSv4ComplSingle(const req_state *const s)
+    : io_base_t(nullptr), cct(s->cct),
+      expected_request_payload_hash(get_v4_exp_payload_hash(s->info)),
+      sha256_hash(calc_hash_sha256_open_stream()) {}
 
 rgw::auth::Completer::cmplptr_t
-AWSv4ComplSingle::create(const req_state* const s,
-                         const boost::optional<std::string>&)
-{
+AWSv4ComplSingle::create(const req_state *const s,
+                         const boost::optional<std::string> &) {
   return std::make_shared<AWSv4ComplSingle>(s);
 }
 

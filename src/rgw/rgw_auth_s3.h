@@ -701,7 +701,7 @@ static inline bool is_v4_payload_streamed(const char* const exp_payload_hash)
   return boost::algorithm::starts_with(exp_payload_hash, "STREAMING-");
 }
 
-std::string get_v4_canonical_qs(const req_info& info, bool using_qs);
+std::string get_v4_canonical_qs(const req_info& info, bool using_qs, const DoutPrefixProvider* dpp = nullptr);
 
 std::string gen_v4_canonical_qs(const req_info& info, bool is_non_s3_op);
 
